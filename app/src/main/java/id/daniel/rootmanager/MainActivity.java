@@ -9,6 +9,7 @@ import android.widget.*;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -32,16 +33,13 @@ public class MainActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(20), dp(24), dp(20), dp(18));
         page.setBackgroundColor(bg);
-
-        TextView title = text("Root Manager", 30, true, fg);
-        page.addView(title);
-        page.addView(text("Pemantau temporary root · versi 0.1.0", 14, false, muted));
+        page.addView(text("Root Manager", 30, true, fg));
+        page.addView(text("Pemantau temporary root · versi 0.2.0", 14, false, muted));
         page.addView(space(20));
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-
         rootStatus = text("Status root: belum diperiksa", 19, true, fg);
         card(content, rootStatus);
         deviceInfo = text("Informasi perangkat akan tampil setelah pemeriksaan.", 14, false, fg);
@@ -49,14 +47,12 @@ public class MainActivity extends Activity {
         securityInfo = text("Status keamanan belum diperiksa.", 14, false, fg);
         card(content, securityInfo);
 
-        Button refresh = button("Periksa sekarang");
+        Button refresh = button("Periksa ulang sekarang");
         refresh.setOnClickListener(v -> refresh());
         content.addView(refresh, matchWrap());
-
         Button save = button("Simpan laporan");
         save.setOnClickListener(v -> saveReport());
         content.addView(save, matchWrap());
-
         Button copy = button("Salin laporan");
         copy.setOnClickListener(v -> {
             ClipboardManager cm = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
@@ -64,8 +60,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Laporan disalin", Toast.LENGTH_SHORT).show();
         });
         content.addView(copy, matchWrap());
-
-        logView = text("Log:\nAplikasi siap. Tekan Periksa sekarang.", 13, false, muted);
+        logView = text("Riwayat pemeriksaan akan tampil di sini.", 13, false, muted);
         card(content, logView);
         scroll.addView(content);
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -77,36 +72,74 @@ public class MainActivity extends Activity {
         rootStatus.setText("Status root: sedang diperiksa…");
         executor.execute(() -> {
             Cmd id = run("su -c id", 7000);
-            Cmd getenforce = run("getenforce", 3000);
+            SelinuxResult selinux = readSelinux();
             String fingerprint = prop("ro.build.fingerprint");
             String model = prop("ro.product.model");
             String android = prop("ro.build.version.release") + " (SDK " + prop("ro.build.version.sdk") + ")";
-            String kernel = run("uname -r", 3000).output;
+            String kernel = run("uname -r", 3000).output.trim();
             String abi = prop("ro.product.cpu.abi");
             String kmi = detectKmi(kernel);
-            boolean root = id.output.contains("uid=0(") || id.output.matches("(?s).*\\buid=0\\b.*");
-            String state = id.ok && root ? "AKTIF" : (id.ok ? "TIDAK AKTIF" : "TIDAK DIKETAHUI");
+            boolean root = id.ok && (id.output.contains("uid=0(") || id.output.matches("(?s).*\\buid=0\\b.*"));
+            String state = root ? "AKTIF" : (id.ok ? "TIDAK AKTIF" : "TIDAK DIKETAHUI");
             String stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+            String entry = stamp + " — Root: " + state + " | SELinux: " + selinux.status;
+            SharedPreferences prefs = getSharedPreferences("check_history", MODE_PRIVATE);
+            String oldHistory = prefs.getString("items", "");
+            String history = entry + (oldHistory.isEmpty() ? "" : "\n" + oldHistory);
+            String[] rows = history.split("\\n");
+            StringBuilder limited = new StringBuilder();
+            for (int i = 0; i < rows.length && i < 20; i++) {
+                if (i > 0) limited.append("\n");
+                limited.append(rows[i]);
+            }
+            history = limited.toString();
+            prefs.edit().putString("items", history).apply();
+
             String report = "ROOT MANAGER REPORT\nWaktu: " + stamp +
                 "\nStatus root: " + state +
                 "\nPerintah su: " + id.output.trim() +
                 "\nModel: " + model + "\nAndroid: " + android +
                 "\nKernel: " + kernel + "\nKMI (perkiraan): " + kmi +
-                "\nABI: " + abi + "\nSELinux: " + getenforce.output.trim() +
+                "\nABI: " + abi + "\nSELinux: " + selinux.status +
+                "\nMetode SELinux: " + selinux.method +
+                "\nDetail SELinux: " + selinux.detail +
                 "\nFingerprint: " + fingerprint +
-                "\nCatatan: hasil diagnostik; bukan sertifikasi keamanan perangkat.\n";
+                "\n\nRIWAYAT PEMERIKSAAN (maks. 20)\n" + history +
+                "\n\nCatatan: hasil diagnostik; bukan sertifikasi keamanan perangkat.\n";
             latestReport = report;
+            final String shownHistory = history;
             runOnUiThread(() -> {
                 rootStatus.setText("Status root: " + state + (root ? "\nUID 0 terkonfirmasi" : ""));
                 rootStatus.setTextColor(root ? green : fg);
                 deviceInfo.setText("PERANGKAT\nModel: " + model + "\nAndroid: " + android +
                     "\nKernel: " + kernel + "\nKMI (perkiraan): " + kmi + "\nABI: " + abi);
-                securityInfo.setText("KEAMANAN\nSELinux: " + getenforce.output.trim() +
+                securityInfo.setText("KEAMANAN\nSELinux: " + selinux.status +
+                    "\nMetode: " + selinux.method + "\nDetail: " + selinux.detail +
                     "\nSu check: " + (id.ok ? "perintah selesai" : "gagal / timeout") +
                     "\nBuild fingerprint: " + fingerprint);
-                logView.setText("LOG TERAKHIR\n" + report);
+                logView.setText("RIWAYAT PEMERIKSAAN\n" + shownHistory + "\n\nLAPORAN TERAKHIR\n" + report);
             });
         });
+    }
+
+    private static class SelinuxResult {
+        String status, method, detail;
+        SelinuxResult(String s, String m, String d) { status=s; method=m; detail=d; }
+    }
+
+    private SelinuxResult readSelinux() {
+        Cmd g = run("su -c getenforce", 4000);
+        String value = g.output.trim();
+        if (g.ok && (value.equalsIgnoreCase("Enforcing") || value.equalsIgnoreCase("Permissive") || value.equalsIgnoreCase("Disabled"))) {
+            return new SelinuxResult(value, "getenforce melalui su", value);
+        }
+        Cmd f = run("su -c 'cat /sys/fs/selinux/enforce'", 4000);
+        String flag = f.output.trim();
+        if (f.ok && flag.equals("1")) return new SelinuxResult("Enforcing", "file kernel /sys/fs/selinux/enforce", "nilai 1");
+        if (f.ok && flag.equals("0")) return new SelinuxResult("Permissive", "file kernel /sys/fs/selinux/enforce", "nilai 0");
+        String detail = value.isEmpty() ? f.output.trim() : value;
+        if (detail.isEmpty()) detail = "akses ditolak atau informasi tidak tersedia";
+        return new SelinuxResult("TIDAK DIKETAHUI", "pemeriksaan alternatif gagal", detail);
     }
 
     private String detectKmi(String kernel) {
